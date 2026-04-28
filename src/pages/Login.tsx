@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { Wifi } from 'lucide-react'
+import { Link } from 'react-router-dom'
 
 export default function Login() {
   const [email, setEmail] = useState('')
@@ -55,6 +56,14 @@ export default function Login() {
               placeholder="••••••••"
               required
             />
+            <div className="flex justify-end mt-2">
+              <Link
+                to="/forgot-password"
+                className="text-sm font-medium text-indigo-600 hover:text-indigo-700 hover:underline"
+              >
+                Esqueci minha senha
+              </Link>
+            </div>
           </div>
           <button
             type="submit"

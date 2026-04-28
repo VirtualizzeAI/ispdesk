@@ -14,7 +14,7 @@ export function useProfile() {
         const { data: { user } } = await supabase.auth.getUser()
         if (!user || cancelled) return
 
-        const { data, error } = await supabase
+        const { data } = await supabase
           .from('profiles')
           .select('*')
           .eq('id', user.id)
@@ -24,7 +24,7 @@ export function useProfile() {
           setProfile(data ?? null)
           setLoading(false)
         }
-      } catch (error) {
+      } catch {
         if (!cancelled) setLoading(false)
       }
     }

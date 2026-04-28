@@ -4,6 +4,8 @@ import { useEffect, useState } from 'react'
 import { supabase } from './lib/supabase'
 import Layout from './components/Layout'
 import Login from './pages/Login'
+import ForgotPassword from './pages/ForgotPassword'
+import ResetPassword from './pages/ResetPassword'
 import Dashboard from './pages/Dashboard'
 import Conversations from './pages/Conversations'
 import Contacts from './pages/Contacts'
@@ -37,6 +39,8 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <Routes>
+          <Route path="/forgot-password" element={!session ? <ForgotPassword /> : <Navigate to="/dashboard" />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/login" element={!session ? <Login /> : <Navigate to="/dashboard" />} />
           <Route path="/" element={session ? <Layout /> : <Navigate to="/login" />}>
             <Route index element={<Navigate to="/dashboard" />} />
