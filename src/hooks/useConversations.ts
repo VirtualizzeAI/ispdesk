@@ -20,12 +20,20 @@ export function useConversations(tenantId: string) {
 
       const { data } = await supabase
         .from('conversations')
-        .select(`*, contact:contacts(*)`)
+        .select(`*, contact:contacts(*), messages(id, conversation_id, tenant_id, from_me, content, type, media_url, whatsapp_id, created_at)`)
         .eq('tenant_id', tenantId)
         .order('updated_at', { ascending: false })
+        .order('created_at', { ascending: false, foreignTable: 'messages' })
+        .limit(1, { foreignTable: 'messages' })
+
+      const conversationsWithLastMessage = ((data as any) ?? []).map((conv: any) => {
+        const msgs: Message[] = conv.messages ?? []
+        const { messages: _msgs, ...rest } = conv
+        return { ...rest, last_message: msgs[0] ?? undefined }
+      }) as Conversation[]
 
       if (!cancelled) {
-        setConversations((data as any) ?? [])
+        setConversations(conversationsWithLastMessage)
         if (!initialLoadDone.current) {
           setLoading(false)
           initialLoadDone.current = true
@@ -44,6 +52,12 @@ export function useConversations(tenantId: string) {
         table: 'conversations',
         filter: `tenant_id=eq.${tenantId}`,
       }, () => fetchConversations())
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'messages',
+        filter: `tenant_id=eq.${tenantId}`,
+      }, () => fetchConversations())
       .subscribe()
 
     return () => {
@@ -57,10 +71,17 @@ export function useConversations(tenantId: string) {
 
 export function useMessages(conversationId: string) {
   const [messages, setMessages] = useState<Message[]>([])
+  const [loadingMessages, setLoadingMessages] = useState(false)
 
   useEffect(() => {
-    if (!conversationId) return
+    if (!conversationId) {
+      setMessages([])
+      return
+    }
 
+    // Limpa imediatamente ao trocar de conversa para não mostrar mensagens antigas
+    setMessages([])
+    setLoadingMessages(true)
     let cancelled = false
 
     async function fetchMessages() {
@@ -70,7 +91,10 @@ export function useMessages(conversationId: string) {
         .eq('conversation_id', conversationId)
         .order('created_at', { ascending: true })
 
-      if (!cancelled) setMessages(data ?? [])
+      if (!cancelled) {
+        setMessages(data ?? [])
+        setLoadingMessages(false)
+      }
     }
 
     fetchMessages()
@@ -83,7 +107,19 @@ export function useMessages(conversationId: string) {
         table: 'messages',
         filter: `conversation_id=eq.${conversationId}`,
       }, (payload) => {
-        setMessages(prev => [...prev, payload.new as Message])
+        setMessages(prev => {
+          // Evita duplicar se o realtime chegou antes do fetch terminar
+          if (prev.some(m => m.id === (payload.new as Message).id)) return prev
+          return [...prev, payload.new as Message]
+        })
+      })
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'messages',
+        filter: `conversation_id=eq.${conversationId}`,
+      }, (payload) => {
+        setMessages(prev => prev.map(m => m.id === (payload.new as Message).id ? payload.new as Message : m))
       })
       .subscribe()
 
@@ -93,5 +129,5 @@ export function useMessages(conversationId: string) {
     }
   }, [conversationId])
 
-  return { messages }
+  return { messages, loadingMessages }
 }

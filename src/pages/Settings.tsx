@@ -106,7 +106,9 @@ export default function Settings() {
     if (!apelido) return
 
     const instancia = instanceName || `${apelido}_${profile?.tenant_id?.slice(0, 8)}`
-    const webhookUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/evolution-webhook`
+    // Usa VITE_WEBHOOK_URL se configurado, senão usa a URL pública do Codespace na porta 3001
+    const webhookBase = import.meta.env.VITE_WEBHOOK_URL || window.location.origin.replace(/:\d+$/, ':3001')
+    const webhookUrl = `${webhookBase}/webhook/evolution`
 
     setLoadingQR(true)
     setQrCode(null)

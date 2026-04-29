@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Search, Link, CheckCircle, Loader } from 'lucide-react'
 import { supabase } from '../lib/supabase'
-import { searchMKByCPF, getMKClienteListar, formatMKStatus } from '../lib/mkauth'
+import { searchMKByCPF, getMKClienteListar, getMKTitulosByCPF, formatMKStatus } from '../lib/mkauth'
 
 interface Props {
   contact: any
@@ -24,34 +24,114 @@ export default function MKSearchPanel({
   const [linking, setLinking] = useState(false)
   const [linked, setLinked] = useState(false)
   const [mostrarPagos, setMostrarPagos] = useState(false)
+  const [resultSource, setResultSource] = useState<'db' | 'mk' | null>(null)
+
+  const normalizeSearchText = (value: string) =>
+    value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .trim()
+
+  const onlyDigits = (value: string) => value.replace(/\D/g, '')
+
+  const searchLocalClients = async (rawQuery: string) => {
+    const normalizedQuery = normalizeSearchText(rawQuery)
+    const digitsQuery = onlyDigits(rawQuery)
+
+    const { data, error } = await supabase
+      .from('contacts')
+      .select('name, mk_id, mk_data, whatsapp, mk_synced_at')
+      .eq('tenant_id', profile.tenant_id)
+      .not('mk_id', 'is', null)
+      .order('mk_synced_at', { ascending: false, nullsFirst: false })
+      .limit(1000)
+
+    if (error || !data) return []
+
+    return data
+      .map((row: any) => {
+        const mkData = typeof row.mk_data === 'object' && row.mk_data !== null
+          ? row.mk_data
+          : {}
+
+        const nome = String((mkData as any).nome || row.name || '')
+        const login = String((mkData as any).login || row.mk_id || '')
+        const cpfCnpj = String((mkData as any).cpf_cnpj || '')
+        const whatsapp = String(row.whatsapp || '')
+
+        return {
+          ...mkData,
+          nome,
+          login,
+          cpf_cnpj: cpfCnpj,
+          fone: String((mkData as any).fone || whatsapp || ''),
+        }
+      })
+      .filter((cliente: any) => {
+        const normalizedName = normalizeSearchText(String(cliente.nome || ''))
+        const normalizedLogin = normalizeSearchText(String(cliente.login || ''))
+        const normalizedCpf = onlyDigits(String(cliente.cpf_cnpj || ''))
+
+        if (digitsQuery.length >= 3) {
+          return normalizedCpf.includes(digitsQuery)
+            || normalizedLogin.includes(normalizedQuery)
+            || normalizedName.includes(normalizedQuery)
+        }
+
+        return normalizedName.includes(normalizedQuery)
+          || normalizedLogin.includes(normalizedQuery)
+      })
+      .slice(0, 8)
+  }
 
   const handleSearch = (value: string) => {
     setQuery(value)
     setResults([])
+    setResultSource(null)
   }
 
   const handleBuscar = async () => {
     if (!query || query.length < 3) return
     setSearching(true)
-    const isCPF = query.replace(/\D/g, '').length >= 8
+    setResultSource(null)
 
-    if (isCPF) {
-      const cpf = query.replace(/\D/g, '')
-      const data = await searchMKByCPF(profile.tenant_id, cpf)
-      if (data?.cliente) {
-        setResults([{ ...data.cliente, _titulos: data.titulos }])
-      } else {
-        setResults([])
+    try {
+      const localResults = await searchLocalClients(query)
+      if (localResults.length > 0) {
+        setResults(localResults)
+        setResultSource('db')
+        return
       }
-    } else {
-      const clientes = await getMKClienteListar(profile.tenant_id, 1, query)
-      setResults(clientes.slice(0, 8))
+
+      const isCPF = onlyDigits(query).length >= 8
+
+      if (isCPF) {
+        const cpf = onlyDigits(query)
+        const data = await searchMKByCPF(profile.tenant_id, cpf)
+        if (data?.cliente) {
+          setResults([{ ...data.cliente, _titulos: data.titulos }])
+          setResultSource('mk')
+        } else {
+          setResults([])
+        }
+      } else {
+        const clientes = await getMKClienteListar(profile.tenant_id, 1, query)
+        const reducedResults = clientes.slice(0, 8)
+        setResults(reducedResults)
+        if (reducedResults.length > 0) setResultSource('mk')
+      }
+    } finally {
+      setSearching(false)
     }
-    setSearching(false)
   }
 
   const linkClient = async (cliente: any) => {
     setLinking(true)
+    const titulos = Array.isArray(cliente._titulos)
+      ? cliente._titulos
+      : (cliente.cpf_cnpj ? await getMKTitulosByCPF(profile.tenant_id, cliente.cpf_cnpj) : [])
+
     await supabase
       .from('contacts')
       .update({
@@ -62,11 +142,11 @@ export default function MKSearchPanel({
       })
       .eq('id', contact.id)
 
-    const titulos = cliente._titulos || []
     onBoletosFetched(titulos)
     onClientSelected(cliente)
     setResults([])
     setQuery('')
+    setResultSource(null)
     setLinked(true)
     setTimeout(() => setLinked(false), 3000)
     setLinking(false)
@@ -186,6 +266,12 @@ export default function MKSearchPanel({
                 : <><Search size={14} /> Buscar cliente</>
               }
             </button>
+
+            {resultSource && results.length > 0 && (
+              <p className="text-[11px] text-gray-400 text-center">
+                {resultSource === 'db' ? 'Resultados do banco local' : 'Resultados do MK-Auth'}
+              </p>
+            )}
 
             {results.length > 0 && (
               <div className="border border-gray-200 rounded-xl overflow-hidden">

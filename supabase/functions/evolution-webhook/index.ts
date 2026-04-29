@@ -8,6 +8,59 @@ const EVOLUTION_URL = Deno.env.get('VITE_EVOLUTION_URL') || Deno.env.get('EVOLUT
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
+function mediaMimeByType(mediaType: string) {
+  if (mediaType === 'image') return 'image/jpeg'
+  if (mediaType === 'video') return 'video/mp4'
+  if (mediaType === 'audio') return 'audio/ogg'
+  return 'application/octet-stream'
+}
+
+function normalizeToDataUri(base64Value: string, mediaType: string, mimeType?: string | null) {
+  const trimmed = String(base64Value || '').trim()
+  if (!trimmed) return null
+  if (trimmed.startsWith('data:')) return trimmed
+  return `data:${mimeType || mediaMimeByType(mediaType)};base64,${trimmed}`
+}
+
+function unwrapMessage(message: any): any {
+  let current = message
+  for (let i = 0; i < 5; i += 1) {
+    if (!current || typeof current !== 'object') break
+
+    if (current.ephemeralMessage?.message) {
+      current = current.ephemeralMessage.message
+      continue
+    }
+    if (current.viewOnceMessage?.message) {
+      current = current.viewOnceMessage.message
+      continue
+    }
+    if (current.viewOnceMessageV2?.message) {
+      current = current.viewOnceMessageV2.message
+      continue
+    }
+    if (current.viewOnceMessageV2Extension?.message) {
+      current = current.viewOnceMessageV2Extension.message
+      continue
+    }
+    if (current.documentWithCaptionMessage?.message) {
+      current = current.documentWithCaptionMessage.message
+      continue
+    }
+    break
+  }
+
+  return current || message
+}
+
+function mediaTypeFromMime(mimetype: string) {
+  const lower = String(mimetype || '').toLowerCase()
+  if (lower.startsWith('image/')) return 'image'
+  if (lower.startsWith('video/')) return 'video'
+  if (lower.startsWith('audio/')) return 'audio'
+  return 'document'
+}
+
 serve(async (req) => {
   try {
     const payload = await req.json()
@@ -19,6 +72,8 @@ serve(async (req) => {
     const instanceName = payload.instance
     const msgData = payload.data?.message
     const msgKey = payload.data?.key
+    // messageType é o indicador mais confiável do tipo da mensagem
+    const messageType = (payload.data?.messageType as string) || ''
     
     if (!msgData || !msgKey || msgKey.fromMe) {
       return new Response('Ignorado - Mensagem inválida ou enviada por mim', { status: 200 })
@@ -37,41 +92,33 @@ serve(async (req) => {
 
     const phone = msgKey.remoteJid.replace('@s.whatsapp.net', '')
 
-    // Buscar ou criar contato
-    let { data: contact } = await supabase
+    // Upsert garante idempotencia de contato em mensagens simultaneas.
+    const pushName = payload.data?.pushName || phone
+    const { data: contact, error: contactError } = await supabase
       .from('contacts')
+      .upsert({
+        tenant_id: tenant.id,
+        whatsapp: phone,
+        name: pushName,
+      }, { onConflict: 'tenant_id,whatsapp' })
       .select('id')
-      .eq('tenant_id', tenant.id)
-      .eq('whatsapp', phone)
       .single()
 
-    if (!contact) {
-      const pushName = payload.data?.pushName || phone
-      const { data: newContact, error: contactError } = await supabase
-        .from('contacts')
-        .insert({
-          tenant_id: tenant.id,
-          whatsapp: phone,
-          name: pushName,
-        })
-        .select()
-        .single()
-      
-      if (contactError) throw contactError
-      contact = newContact
-    }
+    if (contactError || !contact) throw contactError || new Error('Falha ao resolver contato')
 
-    // Buscar ou criar conversa
-    let { data: conversation } = await supabase
+    // Busca todas as conversas ativas para consolidar em apenas uma conversa canonica.
+    let { data: activeConversations, error: activeConvError } = await supabase
       .from('conversations')
-      .select('id, status')
+      .select('id, status, created_at')
       .eq('tenant_id', tenant.id)
       .eq('contact_id', contact.id)
       .in('status', ['open', 'waiting'])
-      .maybeSingle()
+      .order('created_at', { ascending: true })
 
-    if (!conversation) {
-      const { data: newConversation, error: convError } = await supabase
+    if (activeConvError) throw activeConvError
+
+    if (!activeConversations || activeConversations.length === 0) {
+      const { error: convInsertError } = await supabase
         .from('conversations')
         .insert({
           tenant_id: tenant.id,
@@ -80,34 +127,73 @@ serve(async (req) => {
           assigned_to: null,
           title: 'Novo Chat',
         })
-        .select()
-        .single()
-      
-      if (convError) throw convError
-      conversation = newConversation
+
+      if (convInsertError) throw convInsertError
+
+      const { data: refetchedConversations, error: refetchError } = await supabase
+        .from('conversations')
+        .select('id, status, created_at')
+        .eq('tenant_id', tenant.id)
+        .eq('contact_id', contact.id)
+        .in('status', ['open', 'waiting'])
+        .order('created_at', { ascending: true })
+
+      if (refetchError) throw refetchError
+      activeConversations = refetchedConversations || []
     }
 
-    // Se a conversa estava closed ou waiting, atualiza o status ou updated_at
-    await supabase.from('conversations').update({ updated_at: new Date().toISOString() }).eq('id', conversation.id)
+    const conversation = activeConversations[0]
+    if (!conversation) throw new Error('Falha ao resolver conversa')
+
+    if (activeConversations.length > 1) {
+      const duplicatedConversationIds = activeConversations.slice(1).map((item) => item.id)
+      await supabase
+        .from('conversations')
+        .update({ status: 'closed', updated_at: new Date().toISOString() })
+        .in('id', duplicatedConversationIds)
+    }
+
+    const normalizedMessage = unwrapMessage(msgData)
+
+    // Deduplicação: ignora se whatsapp_id já existe (webhook pode disparar múltiplas vezes para o mesmo evento)
+    const { count: existingCount } = await supabase
+      .from('messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('whatsapp_id', msgKey.id)
+      .eq('tenant_id', tenant.id)
+    
+    if (existingCount && existingCount > 0) {
+      return new Response('Duplicado ignorado', { status: 200 })
+    }
 
     // Processar Conteúdo da Mensagem e Mídia
+    // Usa messageType do payload como indicador primário (mais confiável que checar chaves internas)
     let content = ''
     let mediaType = 'text'
-    let mediaUrl = null
+    let mediaBase64: string | null = null
+    let mediaMimeType: string | null = null
 
-    if (msgData.conversation || msgData.extendedTextMessage?.text) {
-      content = msgData.conversation || msgData.extendedTextMessage?.text
-    } else if (msgData.imageMessage) {
+    if (messageType === 'imageMessage' || normalizedMessage.imageMessage) {
       mediaType = 'image'
-      content = msgData.imageMessage.caption || ''
-    } else if (msgData.videoMessage) {
+      const imgMsg = normalizedMessage.imageMessage || {}
+      content = imgMsg.caption || ''
+      mediaMimeType = imgMsg.mimetype || 'image/jpeg'
+    } else if (messageType === 'videoMessage' || normalizedMessage.videoMessage) {
       mediaType = 'video'
-      content = msgData.videoMessage.caption || ''
-    } else if (msgData.audioMessage) {
+      const vidMsg = normalizedMessage.videoMessage || {}
+      content = vidMsg.caption || ''
+      mediaMimeType = vidMsg.mimetype || 'video/mp4'
+    } else if (messageType === 'audioMessage' || messageType === 'pttMessage' || normalizedMessage.audioMessage || normalizedMessage.pttMessage) {
       mediaType = 'audio'
-    } else if (msgData.documentMessage) {
-      mediaType = 'document'
-      content = msgData.documentMessage.fileName || 'documento'
+      const audMsg = normalizedMessage.audioMessage || normalizedMessage.pttMessage || {}
+      mediaMimeType = audMsg.mimetype || 'audio/ogg'
+    } else if (messageType === 'documentMessage' || messageType === 'documentWithCaptionMessage' || normalizedMessage.documentMessage) {
+      const docMsg = normalizedMessage.documentMessage || {}
+      mediaMimeType = docMsg.mimetype || 'application/octet-stream'
+      mediaType = mediaTypeFromMime(mediaMimeType)
+      content = docMsg.caption || docMsg.fileName || ''
+    } else if (normalizedMessage.conversation || normalizedMessage.extendedTextMessage?.text) {
+      content = normalizedMessage.conversation || normalizedMessage.extendedTextMessage?.text || ''
     }
 
     // Se for mídia, tenta puxar o Base64 da Evolution API
@@ -121,27 +207,34 @@ serve(async (req) => {
             'apikey': evolutionApiKey
           },
           body: JSON.stringify({
-            message: { key: msgKey },
-            convertToMp4: false
+            message: { key: { id: msgKey.id } },
+            convertToMp4: mediaType === 'video'
           })
         })
         
         if (b64Res.ok) {
           const b64Data = await b64Res.json()
-          let base64str = b64Data.base64
-          if (!base64str && typeof b64Data === 'string' && b64Data.startsWith('data:')) {
-            base64str = b64Data
+          const rawBase64 = b64Data?.base64 || null
+          if (rawBase64) {
+            // Usa o mimetype real da resposta, não o inferido
+            const responseMime = b64Data?.mimetype || mediaMimeType || mediaMimeByType(mediaType)
+            mediaMimeType = responseMime
+            // Salva a Data URI completa na coluna base64
+            mediaBase64 = `data:${responseMime};base64,${rawBase64}`
+            // Pega caption da resposta se não veio no webhook
+            if (!content && b64Data?.caption) {
+              content = b64Data.caption
+            }
           }
-          if (base64str) {
-            mediaUrl = base64str
-          }
+        } else {
+          console.error('Falha getBase64FromMediaMessage:', b64Res.status, await b64Res.text())
         }
       } catch (err) {
         console.error('Falha ao baixar base64:', err)
       }
     }
 
-    if (!content && !mediaUrl) {
+    if (!content && mediaType === 'text') {
       content = '[Mensagem não suportada]'
     }
 
@@ -152,13 +245,19 @@ serve(async (req) => {
       from_me: false,
       content: content,
       type: mediaType,
-      media_url: mediaUrl,
+      base64: mediaBase64,      // Data URI completa: data:mime/type;base64,... (sem media_url)
       whatsapp_id: msgKey.id
     })
     
     if (msgInsertError) {
       console.error('Erro ao inserir mensagem:', msgInsertError)
     }
+
+    // Atualiza o updated_at da conversa depois da mensagem persistida.
+    await supabase
+      .from('conversations')
+      .update({ updated_at: new Date().toISOString() })
+      .eq('id', conversation.id)
 
     return new Response('OK', { status: 200 })
   } catch (error) {

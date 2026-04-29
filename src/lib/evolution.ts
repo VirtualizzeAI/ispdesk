@@ -6,6 +6,13 @@ const headers = {
   'apikey': EVOLUTION_KEY,
 }
 
+function mediaMimeByType(mediaType: 'image' | 'audio' | 'video' | 'document') {
+  if (mediaType === 'image') return 'image/jpeg'
+  if (mediaType === 'video') return 'video/mp4'
+  if (mediaType === 'audio') return 'audio/ogg'
+  return 'application/octet-stream'
+}
+
 export async function createInstance(instanceName: string) {
   const res = await fetch(`${EVOLUTION_URL}/instance/create`, {
     method: 'POST',
@@ -62,9 +69,6 @@ export async function sendMediaMessage(
   fileName: string,
   caption?: string
 ) {
-  // If it's an audio file and looks like a voice recording, we should probably send it as WhatsApp Audio (PTT).
-  // But standard /message/sendMedia handles all media types.
-  
   const payload: any = {
     number: to,
     mediatype: mediaType,
@@ -72,26 +76,44 @@ export async function sendMediaMessage(
     media: mediaBase64,
   }
 
-  // Documents and other media usually use fileName
-  if (fileName) {
-    payload.fileName = fileName;
-  }
-  if (caption && mediaType !== 'audio') {
-    payload.caption = caption;
+  if (fileName) payload.fileName = fileName
+  if (caption && mediaType !== 'audio') payload.caption = caption
+
+  const parseKeyId = (data: any) => data?.key?.id || data?.data?.key?.id || data?.message?.key?.id || null
+
+  const postEvolution = async (endpoint: string, body: any) => {
+    const res = await fetch(`${EVOLUTION_URL}/message/${endpoint}/${instanceName}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    })
+    const json = await res.json().catch(() => ({}))
+    const keyId = parseKeyId(json)
+    const status = String(json?.status || json?.data?.status || '').toUpperCase()
+    return { ok: res.ok, keyId, status, json, endpoint }
   }
 
-  // Se o tipo for áudio e for gravação de voz, o Evolution aceita o endpoint sendWhatsAppAudio.
-  // Vamos usar um endpoint dinâmico: se for gravação de voz o ideal é outro endpoint ou usar o pt /voice.
-  // Mas a documentação padrão do Evolution recomenda sendWhatsAppAudio para mensagens de áudio gravado.
-  const endpoint = mediaType === 'audio' ? 'sendWhatsAppAudio' : 'sendMedia';
+  if (mediaType === 'audio') {
+    const audioPayload = {
+      number: to,
+      audio: mediaBase64,
+      ptt: true,
+      delay: 1200,
+    }
 
-  const res = await fetch(`${EVOLUTION_URL}/message/${endpoint}/${instanceName}`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(payload),
-  })
-  
-  return res.json()
+    const audioResult = await postEvolution('sendWhatsAppAudio', audioPayload)
+    console.log('[Evolution] Resposta sendWhatsAppAudio:', audioResult.json)
+    if (audioResult.ok && (audioResult.keyId || audioResult.status === 'PENDING')) {
+      return audioResult.json
+    }
+  }
+
+  const mediaResult = await postEvolution('sendMedia', payload)
+  console.log('[Evolution] Resposta sendMedia:', mediaResult.json)
+  if (!mediaResult.ok) {
+    console.error(`[Evolution] Erro ao enviar ${mediaType}:`, mediaResult.json)
+  }
+  return mediaResult.json
 }
 
 export async function setWebhook(instanceName: string, webhookUrl: string) {
@@ -118,30 +140,38 @@ export async function setWebhook(instanceName: string, webhookUrl: string) {
   return data
 }
 
-export async function getMediaBase64(instanceName: string, messageId: string) {
+export async function getMediaBase64(
+  instanceName: string,
+  messageId: string,
+  mediaType: 'image' | 'audio' | 'video' | 'document' = 'document'
+) {
   try {
+    const requestBody = {
+      message: {
+        key: {
+          id: messageId,
+        }
+      },
+      convertToMp4: mediaType === 'video'
+    }
+
     const res = await fetch(`${EVOLUTION_URL}/chat/getBase64FromMediaMessage/${instanceName}`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        message: {
-          key: {
-            id: messageId
-          }
-        },
-        convertToMp4: false
-      }),
+      body: JSON.stringify(requestBody),
     })
-    const text = await res.text()
-    try {
-      const json = JSON.parse(text)
-      return json.base64 || null
-    } catch(e) {
-      if (text && text.includes('data:')) return text;
-      return null
-    }
+
+    if (!res.ok) return null
+
+    const json = await res.json()
+    const payload = json?.data?.message || json?.data || json?.message || json
+    const rawBase64 = payload?.base64 || json?.base64 || null
+    if (!rawBase64) return null
+    // Usa o mimetype real da resposta (não inferência por assinatura)
+    const mime = payload?.mimetype || payload?.mimeType || json?.mimetype || mediaMimeByType(mediaType)
+    return `data:${mime};base64,${rawBase64}`
   } catch(error) {
     console.error('Error fetching base64 from Evolution:', error)
     return null
   }
-}
+}

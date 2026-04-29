@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
-import { Search, Send, MoreVertical, User, FileText, Loader, CheckCircle, RefreshCw, Paperclip, X, Image as ImageIcon, File as FileIcon, Mic } from 'lucide-react'
+import { Search, Send, MoreVertical, User, FileText, Loader, CheckCircle, RefreshCw, Paperclip, X, Image as ImageIcon, File as FileIcon, Mic, PanelRightClose, Square } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useConversations, useMessages } from '../hooks/useConversations'
 import { useProfile } from '../hooks/useProfile'
 import { getMKClientByLogin, getMKTitulosByCPF } from '../lib/mkauth'
 import { sendTextMessage, sendMediaMessage, getMediaBase64 } from '../lib/evolution'
+import type { Message } from '../types'
 
 import MKSearchPanel from '../components/MKSearchPanel'
 
@@ -17,31 +18,201 @@ const statusLabel: Record<string, string> = {
   open: 'Aberto', waiting: 'Aguardando', closed: 'Fechado',
 }
 
+type MessageListItem =
+  | { type: 'separator'; key: string; label: string }
+  | { type: 'message'; key: string; message: Message }
+
+type DateFilter = 'all' | 'today' | 'yesterday' | 'week' | 'older'
+
+function getStartOfDay(date: Date) {
+  const normalizedDate = new Date(date)
+  normalizedDate.setHours(0, 0, 0, 0)
+  return normalizedDate
+}
+
+function isSameCalendarDay(firstDate: string, secondDate: string) {
+  const first = new Date(firstDate)
+  const second = new Date(secondDate)
+
+  return first.getFullYear() === second.getFullYear()
+    && first.getMonth() === second.getMonth()
+    && first.getDate() === second.getDate()
+}
+
+function formatDaySeparatorLabel(dateString: string) {
+  const date = new Date(dateString)
+  const today = new Date()
+  const yesterday = new Date(today)
+  yesterday.setDate(today.getDate() - 1)
+
+  if (isSameCalendarDay(dateString, today.toISOString())) return 'Hoje'
+  if (isSameCalendarDay(dateString, yesterday.toISOString())) return 'Ontem'
+
+  const includeYear = date.getFullYear() !== today.getFullYear()
+
+  return date.toLocaleDateString('pt-BR', {
+    day: '2-digit',
+    month: 'long',
+    ...(includeYear ? { year: 'numeric' as const } : {}),
+  })
+}
+
+function buildMessageListItems(messages: Message[]): MessageListItem[] {
+  const items: MessageListItem[] = []
+
+  messages.forEach((message, index) => {
+    const previousMessage = messages[index - 1]
+
+    if (!previousMessage || !isSameCalendarDay(previousMessage.created_at, message.created_at)) {
+      items.push({
+        type: 'separator',
+        key: `separator-${message.created_at}`,
+        label: formatDaySeparatorLabel(message.created_at),
+      })
+    }
+
+    items.push({
+      type: 'message',
+      key: message.id,
+      message,
+    })
+  })
+
+  return items
+}
+
+function matchesDateFilter(dateString: string, filter: DateFilter) {
+  if (filter === 'all') return true
+
+  const targetDate = getStartOfDay(new Date(dateString))
+  const today = getStartOfDay(new Date())
+  const differenceInDays = Math.floor((today.getTime() - targetDate.getTime()) / 86400000)
+
+  if (filter === 'today') return differenceInDays === 0
+  if (filter === 'yesterday') return differenceInDays === 1
+  if (filter === 'week') return differenceInDays >= 2 && differenceInDays <= 7
+
+  return differenceInDays > 7
+}
+
+function getConversationPreview(conv: any) {
+  const lastMessage = conv.last_message
+  if (!lastMessage) return 'Sem mensagens ainda'
+
+  let content = (lastMessage.content || '').trim()
+
+  if (!content) {
+    if (lastMessage.type === 'image') content = '[Imagem]'
+    else if (lastMessage.type === 'video') content = '[Video]'
+    else if (lastMessage.type === 'audio') content = '[Audio]'
+    else if (lastMessage.type === 'document') content = '[Documento]'
+    else content = '[Mensagem]'
+  }
+
+  return lastMessage.from_me ? `Voce: ${content}` : content
+}
+
+function isMediaPlaceholder(content?: string) {
+  const normalized = String(content || '').trim().toLowerCase()
+  return normalized === '[midia]' || normalized === '[mídia]'
+}
+
 
 
 const MessageMedia = ({ msg, instanceName }: { msg: any, instanceName: string }) => {
-  const [b64, setB64] = useState<string | null>(msg.media_url || null)
-  const [loading, setLoading] = useState(!msg.media_url)
+  const inferMimeFromBase64 = (value: string) => {
+    const raw = String(value || '').trim()
+    if (!raw || raw.startsWith('data:')) return null
+    if (raw.startsWith('/9j/')) return 'image/jpeg'
+    if (raw.startsWith('iVBORw0KGgo')) return 'image/png'
+    if (raw.startsWith('R0lGOD')) return 'image/gif'
+    if (raw.startsWith('UklGR')) return 'image/webp'
+    if (raw.startsWith('JVBERi0')) return 'application/pdf'
+    if (raw.startsWith('AAAAIGZ0eXB') || raw.startsWith('AAAAGGZ0eXB')) return 'video/mp4'
+    if (raw.startsWith('T2dnUw')) return 'audio/ogg'
+    if (raw.startsWith('SUQz')) return 'audio/mpeg'
+    return null
+  }
+
+  const mediaMimeByType = (mediaType: string) => {
+    if (mediaType === 'image') return 'image/jpeg'
+    if (mediaType === 'video') return 'video/mp4'
+    if (mediaType === 'audio') return 'audio/ogg'
+    return 'application/octet-stream'
+  }
+
+  const normalizeToDataUri = (value: string | null | undefined, mediaType: string) => {
+    const trimmed = String(value || '').trim()
+    if (!trimmed) return null
+    if (trimmed.startsWith('data:')) return trimmed
+    const inferredMime = inferMimeFromBase64(trimmed)
+    return `data:${inferredMime || mediaMimeByType(mediaType)};base64,${trimmed}`
+  }
+
+  const effectiveType = msg.type === 'text' ? 'document' : msg.type
+  const storedMedia = msg.media_url || msg.base64 || null
+  const [b64, setB64] = useState<string | null>(normalizeToDataUri(storedMedia, effectiveType))
+  const [loading, setLoading] = useState(!normalizeToDataUri(storedMedia, effectiveType))
 
   useEffect(() => {
-    if (msg.media_url) return
+    const normalizedStoredMedia = normalizeToDataUri(msg.media_url || msg.base64, effectiveType)
+    if (normalizedStoredMedia) {
+      setB64(normalizedStoredMedia)
+      setLoading(false)
+      return
+    }
+
     const fetchB64 = async () => {
-      // Usa msg.whatsapp_id ou fallback msg.whatsapp_message_id
-      const wid = msg.whatsapp_id || msg.whatsapp_message_id || msg.id
+      // Não chama a API para mensagens tipo 'text' — são dados legados com placeholder
+      if (msg.type === 'text') {
+        setLoading(false)
+        return
+      }
+
+      const wid = msg.whatsapp_id || msg.id
       if (instanceName && wid) {
-        const base64Str = await getMediaBase64(instanceName, wid)
-        if (base64Str) setB64(base64Str)
+        const base64Str = await getMediaBase64(instanceName, wid, effectiveType)
+        if (base64Str) {
+          setB64(base64Str)
+          // Persiste a Data URI completa na coluna base64 para não chamar a API novamente
+          await supabase
+            .from('messages')
+            .update({ base64: base64Str })
+            .eq('id', msg.id)
+        }
       }
       setLoading(false)
     }
     fetchB64()
-  }, [msg, instanceName])
+  }, [msg.id, msg.media_url, msg.base64, msg.type, msg.whatsapp_id, instanceName])
 
   if (loading) return <div className="flex items-center gap-2 py-2"><Loader className="animate-spin text-indigo-400" size={16} /> <span className="text-xs text-gray-500">Carregando mídia...</span></div>
 
-  if (!b64) return null
+  if (!b64) {
+    // Dados legados salvos como text/[mídia] antes da correção do webhook
+    if (msg.type === 'text') return <span className="text-xs text-gray-400 italic">[mídia indisponível]</span>
+    if (msg.type === 'document') {
+      return (
+        <div className="flex items-center gap-2 bg-black/10 p-2 rounded-lg mb-2 text-current">
+          <FileIcon size={16} />
+          <span className="truncate max-w-[220px]">{msg.content || 'Documento recebido (sem visualização)'}</span>
+        </div>
+      )
+    }
+    return null
+  }
 
-  if (msg.type === 'document') {
+  const inferredDataType = b64.startsWith('data:image')
+    ? 'image'
+    : b64.startsWith('data:video')
+      ? 'video'
+      : b64.startsWith('data:audio')
+        ? 'audio'
+        : 'document'
+
+  const renderType = msg.type === 'text' ? inferredDataType : msg.type
+
+  if (renderType === 'document') {
     return (
       <a href={b64} target="_blank" rel="noreferrer" download={msg.content || 'documento'} className="flex items-center gap-2 bg-black/10 p-2 rounded-lg hover:bg-black/20 transition-colors mb-2 text-current cursor-pointer">
         <FileIcon size={16} />
@@ -50,15 +221,15 @@ const MessageMedia = ({ msg, instanceName }: { msg: any, instanceName: string })
     )
   }
 
-  if (msg.type === 'audio') {
-    return <audio src={b64} controls className="max-w-full mb-1" />
+  if (renderType === 'audio') {
+    return <audio src={b64} controls className="w-[240px] max-w-full mb-1" />
   }
 
-  if (msg.type === 'video') {
-    return <video src={b64} controls className="max-w-full rounded-lg mb-1" />
+  if (renderType === 'video') {
+    return <video src={b64} controls className="w-[240px] max-w-full max-h-[320px] rounded-lg mb-1 object-contain" />
   }
 
-  return <img src={b64} alt="Imagem" className="max-w-full rounded-lg mb-1" />
+  return <img src={b64} alt="Imagem" className="w-[240px] max-w-full max-h-[320px] rounded-lg mb-1 object-contain" />
 }
 
 export default function Conversations() {
@@ -66,40 +237,42 @@ export default function Conversations() {
   const { conversations, loading } = useConversations(profile?.tenant_id || '')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const selected = conversations.find(c => c.id === selectedId) ?? null
-  const { messages } = useMessages(selectedId || '')
+  const { messages, loadingMessages } = useMessages(selectedId || '')
   const [message, setMessage] = useState('')
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState('all')
+  const [dateFilter, setDateFilter] = useState<DateFilter>('all')
   const [activeTab, setActiveTab] = useState<'cliente' | 'boletos'>('cliente')
   const [mkClient, setMkClient] = useState<any>(null)
   const [boletos, setBoletos] = useState<any[]>([])
   const [loadingMK, setLoadingMK] = useState(false)
   const [instanceName, setInstanceName] = useState('')
+  const [isClientPanelCollapsed, setIsClientPanelCollapsed] = useState(false)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const messageCountRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
+  const streamRef = useRef<MediaStream | null>(null)
   
   const [attachment, setAttachment] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [isRecording, setIsRecording] = useState(false)
+  const [recordingTime, setRecordingTime] = useState(0)
+  const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
   // Reseta contador ao trocar de conversa e vai para o fim das mensagens
   useEffect(() => {
     messageCountRef.current = 0
-    // Scroll para o fim ao abrir uma conversa
-    setTimeout(() => {
-      const el = messagesContainerRef.current
-      if (el) el.scrollTop = el.scrollHeight
-    }, 50)
   }, [selectedId])
 
-  // Auto scroll para última mensagem — só quando o número de mensagens aumenta
+  // Auto scroll para o fim — quando termina o carregamento inicial e quando chegam novas mensagens
   useEffect(() => {
-    if (messages.length > messageCountRef.current) {
-      const el = messagesContainerRef.current
-      if (el) el.scrollTop = el.scrollHeight
-    }
+    if (loadingMessages) return
+    const el = messagesContainerRef.current
+    if (el) el.scrollTop = el.scrollHeight
     messageCountRef.current = messages.length
-  }, [messages])
+  }, [loadingMessages, messages])
 
   // Busca instância Evolution do tenant
   useEffect(() => {
@@ -165,8 +338,20 @@ export default function Conversations() {
     const matchSearch = name.toLowerCase().includes(search.toLowerCase()) ||
       c.contact?.whatsapp?.includes(search)
     const matchFilter = filter === 'all' || c.status === filter
-    return matchSearch && matchFilter
+    const matchDateFilter = matchesDateFilter(c.updated_at, dateFilter)
+    return matchSearch && matchFilter && matchDateFilter
   })
+
+  useEffect(() => {
+    if (!filtered.length) {
+      setSelectedId(null)
+      return
+    }
+
+    if (!selectedId || !filtered.some(conversation => conversation.id === selectedId)) {
+      setSelectedId(filtered[0].id)
+    }
+  }, [filtered, selectedId])
 
   const handleCloseConversation = async () => {
     if (!selected || !profile) return
@@ -193,9 +378,90 @@ export default function Conversations() {
     return 'document'
   }
 
+  const startRecording = async () => {
+    try {
+      audioChunksRef.current = []
+      setRecordingTime(0)
+      
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
+
+      const preferredMimeTypes = [
+        'audio/ogg;codecs=opus',
+        'audio/webm;codecs=opus',
+        'audio/webm'
+      ]
+      const chosenMimeType = preferredMimeTypes.find((type) => MediaRecorder.isTypeSupported(type))
+
+      const mediaRecorder = chosenMimeType
+        ? new MediaRecorder(stream, { mimeType: chosenMimeType })
+        : new MediaRecorder(stream)
+      mediaRecorderRef.current = mediaRecorder
+      
+      mediaRecorder.ondataavailable = (event) => {
+        audioChunksRef.current.push(event.data)
+      }
+      
+      mediaRecorder.onstop = async () => {
+        const finalMimeType = mediaRecorder.mimeType || chosenMimeType || 'audio/webm'
+        const extension = finalMimeType.includes('ogg') ? 'ogg' : 'webm'
+        const audioBlob = new Blob(audioChunksRef.current, { type: finalMimeType })
+        const audioFile = new File([audioBlob], `audio_${Date.now()}.${extension}`, { type: finalMimeType })
+        setAttachment(audioFile)
+        
+        // Para o stream
+        stream.getTracks().forEach(track => track.stop())
+        streamRef.current = null
+        mediaRecorderRef.current = null
+        
+        if (recordingIntervalRef.current) {
+          clearInterval(recordingIntervalRef.current)
+          recordingIntervalRef.current = null
+        }
+      }
+      
+      mediaRecorder.start()
+      setIsRecording(true)
+      
+      // Contador do tempo de gravação
+      recordingIntervalRef.current = setInterval(() => {
+        setRecordingTime(t => t + 1)
+      }, 1000)
+    } catch (error) {
+      console.error('Erro ao acessar microfone:', error)
+      alert('Permissão de microfone negada')
+    }
+  }
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop()
+      setIsRecording(false)
+    }
+  }
+
+  const cancelRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop()
+      setIsRecording(false)
+      setRecordingTime(0)
+      setAttachment(null)
+      
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop())
+        streamRef.current = null
+      }
+      
+      if (recordingIntervalRef.current) {
+        clearInterval(recordingIntervalRef.current)
+        recordingIntervalRef.current = null
+      }
+    }
+  }
+
   const handleSend = async () => {
     if ((!message.trim() && !attachment) || !selected || !profile || uploading) return
-    const content = message
+    const rawContent = message.trim()
     setMessage('')
     setUploading(true)
 
@@ -204,10 +470,16 @@ export default function Conversations() {
       let mediaType = 'text'
       let mediaBase64 = null
 
+      // Audio nao aceita legenda; ignora qualquer texto digitado nesse caso.
+      let content = rawContent
+
       if (attachment) {
         mediaType = getMediaType(attachment)
         mediaBase64 = await fileToBase64(attachment)
         mediaUrl = `data:${attachment.type};base64,${mediaBase64}`
+        if (mediaType === 'audio') {
+          content = ''
+        }
       }
 
       let sentWppId = null
@@ -224,22 +496,34 @@ export default function Conversations() {
             attachment.name,
             content
           )
-          sentWppId = res?.key?.id || null
+          sentWppId = res?.key?.id || res?.data?.key?.id || res?.message?.key?.id || null
+          const sendStatus = String(res?.status || res?.data?.status || '').toUpperCase()
+          if (!sentWppId && sendStatus !== 'PENDING') {
+            throw new Error('Evolution nao confirmou o envio da midia.')
+          }
         } else {
           const res = await sendTextMessage(instanceName, selected.contact.whatsapp, content)
-          sentWppId = res?.key?.id || null
+          sentWppId = res?.key?.id || res?.data?.key?.id || res?.message?.key?.id || null
+          const sendStatus = String(res?.status || res?.data?.status || '').toUpperCase()
+          if (!sentWppId && sendStatus !== 'PENDING') {
+            throw new Error('Evolution nao confirmou o envio da mensagem.')
+          }
         }
       }
 
       // Salva no banco local
+      const messageContent = attachment
+        ? (mediaType === 'document' ? (content || attachment.name) : content)
+        : content
+
       await supabase.from('messages').insert({
         conversation_id: selected.id,
         tenant_id: profile.tenant_id,
         from_me: true,
-        content: content || (attachment ? attachment.name : ''),
+        content: messageContent,
         type: mediaType,
         media_url: mediaUrl, // Salva o base64 direto no banco
-        media_type: attachment?.type,
+        base64: mediaBase64,
         whatsapp_id: sentWppId
       })
 
@@ -252,6 +536,7 @@ export default function Conversations() {
       setAttachment(null)
     } catch (error) {
       console.error('Erro ao enviar mensagem:', error)
+      alert(error instanceof Error ? error.message : 'Erro ao enviar mensagem')
     } finally {
       setUploading(false)
     }
@@ -282,6 +567,8 @@ export default function Conversations() {
 
     await sendTextMessage(instanceName, wpp, text)
   }
+
+  const messageListItems = buildMessageListItems(messages)
 
   if (!profile) return (
     <div className="flex items-center justify-center h-full">
@@ -325,6 +612,23 @@ export default function Conversations() {
               </button>
             ))}
           </div>
+          <div className="mt-2 flex flex-wrap gap-1">
+            {[
+              ['all', 'Tudo'],
+              ['today', 'Hoje'],
+              ['yesterday', 'Ontem'],
+              ['week', '7 dias'],
+              ['older', 'Antigas'],
+            ].map(([val, label]) => (
+              <button
+                key={val}
+                onClick={() => setDateFilter(val as DateFilter)}
+                className={`px-2.5 py-1 text-xs rounded-full font-medium transition-colors ${dateFilter === val ? 'bg-blue-100 text-blue-700 ring-1 ring-blue-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto divide-y divide-gray-50">
@@ -339,18 +643,23 @@ export default function Conversations() {
               <div className="w-9 h-9 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-600 font-semibold text-sm flex-shrink-0">
                 {(conv.contact?.name || conv.contact?.whatsapp || '?').charAt(0).toUpperCase()}
               </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between mb-0.5">
+              <div className="flex-1 min-w-0 flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium text-gray-900 truncate">
                     {conv.contact?.name || conv.contact?.whatsapp}
                   </p>
-                  <span className="text-xs text-gray-400 flex-shrink-0 ml-1">
-                    {new Date(conv.updated_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                  <p className="text-xs text-gray-500 truncate mt-0.5">
+                    {getConversationPreview(conv)}
+                  </p>
+                </div>
+                <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+                  <span className="text-xs text-gray-400">
+                    {new Date(conv.last_message?.created_at || conv.updated_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                  <span className={`inline-block text-xs px-1.5 py-0.5 rounded-full font-medium ${statusColor[conv.status]}`}>
+                    {statusLabel[conv.status]}
                   </span>
                 </div>
-                <span className={`inline-block text-xs px-1.5 py-0.5 rounded-full font-medium ${statusColor[conv.status]}`}>
-                  {statusLabel[conv.status]}
-                </span>
               </div>
             </div>
           ))}
@@ -395,20 +704,45 @@ export default function Conversations() {
           </div>
 
           <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-5 space-y-3">
-            {messages.map(msg => (
-              <div key={msg.id} className={`flex ${msg.from_me ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-xs lg:max-w-md px-4 py-2.5 rounded-2xl text-sm whitespace-pre-line ${msg.from_me ? 'bg-indigo-600 text-white rounded-tr-sm' : 'bg-white text-gray-800 shadow-sm rounded-tl-sm'
-                  }`}>
-                  {msg.type !== 'text' && (
-                    <MessageMedia msg={msg} instanceName={instanceName} />
-                  )}
-                  {msg.type !== 'document' && msg.content && <p>{msg.content}</p>}
-                  <p className={`text-xs mt-1 ${msg.from_me ? 'text-indigo-200' : 'text-gray-400'}`}>
-                    {new Date(msg.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
-                  </p>
-                </div>
+            {loadingMessages ? (
+              <div className="flex items-center justify-center h-full">
+                <Loader className="animate-spin text-indigo-400" size={24} />
               </div>
-            ))}
+            ) : messageListItems.length === 0 ? (
+              <div className="flex items-center justify-center h-full text-gray-400 text-sm">
+                Nenhuma mensagem
+              </div>
+            ) : messageListItems.map(item => {
+              if (item.type === 'separator') {
+                return (
+                  <div key={item.key} className="flex justify-center py-1">
+                    <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 shadow-sm ring-1 ring-blue-200">
+                      {item.label}
+                    </span>
+                  </div>
+                )
+              }
+
+              const msg = item.message
+
+              return (
+                <div key={item.key} className={`flex ${msg.from_me ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-xs lg:max-w-md px-4 py-2.5 rounded-2xl text-sm whitespace-pre-line break-words ${msg.from_me ? 'bg-indigo-600 text-white rounded-tr-sm' : 'bg-white text-gray-800 shadow-sm rounded-tl-sm'
+                    }`}>
+                    {(msg.type !== 'text' || isMediaPlaceholder(msg.content)) && (
+                      <MessageMedia
+                        msg={msg}
+                        instanceName={instanceName}
+                      />
+                    )}
+                    {msg.type !== 'document' && msg.content && !isMediaPlaceholder(msg.content) && <p className="break-words">{msg.content}</p>}
+                    <p className={`text-xs mt-1 ${msg.from_me ? 'text-indigo-200' : 'text-gray-400'}`}>
+                      {new Date(msg.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                    </p>
+                  </div>
+                </div>
+              )
+            })}
           </div>
 
           <div className="bg-white border-t border-gray-200 p-4">
@@ -447,19 +781,59 @@ export default function Conversations() {
                 />
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  className="p-2.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
-                  disabled={uploading}
+                  className="p-2.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-50"
+                  disabled={uploading || attachment?.type.startsWith('audio/')}
+                  title={attachment?.type.startsWith('audio/') ? "Remova o áudio para anexar outro arquivo" : "Enviar arquivo ou mídia"}
                 >
                   <Paperclip size={20} />
                 </button>
-                <input
-                  value={message}
-                  onChange={e => setMessage(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleSend()}
-                  placeholder={attachment ? "Adicione uma legenda..." : "Digite uma mensagem..."}
-                  className="flex-1 border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  disabled={uploading}
-                />
+                {isRecording ? (
+                  <div className="flex items-center gap-2 px-4 py-2.5 bg-red-50 rounded-xl ring-2 ring-red-200">
+                    <div className="flex items-center gap-2 flex-1">
+                      <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+                      <span className="text-sm font-mono text-red-600 font-medium">
+                        {String(Math.floor(recordingTime / 60)).padStart(2, '0')}:{String(recordingTime % 60).padStart(2, '0')}
+                      </span>
+                    </div>
+                    <button
+                      onClick={stopRecording}
+                      className="p-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
+                      title="Parar gravação"
+                    >
+                      <Square size={16} fill="currentColor" />
+                    </button>
+                    <button
+                      onClick={cancelRecording}
+                      className="p-2 text-red-600 hover:bg-red-100 rounded-lg transition-colors"
+                      title="Cancelar gravação"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={startRecording}
+                    className="p-2.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+                    disabled={uploading}
+                    title="Gravar áudio"
+                  >
+                    <Mic size={20} />
+                  </button>
+                )}
+                {attachment?.type.startsWith('audio/') ? (
+                  <div className="flex-1 h-11 px-4 rounded-xl border border-gray-200 bg-gray-50 flex items-center text-sm text-gray-500">
+                    Audio pronto para envio
+                  </div>
+                ) : (
+                  <input
+                    value={message}
+                    onChange={e => setMessage(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleSend()}
+                    placeholder={attachment ? "Adicione uma legenda..." : "Digite uma mensagem..."}
+                    className="flex-1 border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    disabled={uploading || isRecording}
+                  />
+                )}
                 <button onClick={handleSend}
                   disabled={uploading || (!message.trim() && !attachment)}
                   className="w-11 h-11 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl flex items-center justify-center transition-colors">
@@ -476,38 +850,78 @@ export default function Conversations() {
       )}
 
       {/* Painel MK-Auth */}
-      <div className="w-72 flex-shrink-0 bg-white border-l border-gray-200 flex flex-col">
-        <div className="p-4 border-b border-gray-100">
-          <div className="flex gap-1">
-            {[['cliente', <User size={13} />, 'Cliente'], ['boletos', <FileText size={13} />, 'Boletos']].map(([val, icon, label]) => (
-              <button key={val as string} onClick={() => setActiveTab(val as any)}
-                className={`flex-1 flex items-center justify-center gap-1.5 text-xs py-2 rounded-lg font-medium transition-colors ${activeTab === val ? 'bg-indigo-600 text-white' : 'text-gray-500 hover:bg-gray-100'}`}>
-                {icon as any} {label as string}
+      {isClientPanelCollapsed ? (
+        <div className="w-14 flex-shrink-0 bg-white border-l border-gray-200 flex flex-col items-center py-3 gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab('cliente')
+              setIsClientPanelCollapsed(false)
+            }}
+            title="Abrir menu do cliente"
+            aria-label="Abrir menu do cliente"
+            className={`p-2 rounded-lg transition-colors ${activeTab === 'cliente' ? 'bg-indigo-100 text-indigo-600' : 'text-gray-500 hover:text-indigo-600 hover:bg-indigo-50'}`}
+          >
+            <User size={16} />
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab('boletos')
+              setIsClientPanelCollapsed(false)
+            }}
+            title="Abrir menu de boletos"
+            aria-label="Abrir menu de boletos"
+            className={`p-2 rounded-lg transition-colors ${activeTab === 'boletos' ? 'bg-indigo-100 text-indigo-600' : 'text-gray-500 hover:text-indigo-600 hover:bg-indigo-50'}`}
+          >
+            <FileText size={16} />
+          </button>
+        </div>
+      ) : (
+        <div className="w-72 flex-shrink-0 bg-white border-l border-gray-200 flex flex-col">
+          <div className="p-4 border-b border-gray-100">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="flex-1 flex gap-1">
+                {[['cliente', <User size={13} />, 'Cliente'], ['boletos', <FileText size={13} />, 'Boletos']].map(([val, icon, label]) => (
+                  <button key={val as string} onClick={() => setActiveTab(val as any)}
+                    className={`flex-1 flex items-center justify-center gap-1.5 text-xs py-2 rounded-lg font-medium transition-colors ${activeTab === val ? 'bg-indigo-600 text-white' : 'text-gray-500 hover:bg-gray-100'}`}>
+                    {icon as any} {label as string}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsClientPanelCollapsed(true)}
+                title="Recolher perfil do cliente"
+                aria-label="Recolher perfil do cliente"
+                className="p-2 text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+              >
+                <PanelRightClose size={16} />
               </button>
-            ))}
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4">
+            {loadingMK ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader className="animate-spin text-indigo-400" size={20} />
+              </div>
+            ) : (
+              <MKSearchPanel
+                contact={selected?.contact}
+                profile={profile!}
+                mkClient={mkClient}
+                boletos={boletos}
+                activeTab={activeTab}
+                conversationClosed={selected?.status === 'closed'}
+                onClientSelected={(client) => setMkClient(client)}
+                onBoletosFetched={(bols) => setBoletos(bols)}
+                onEnviarBoleto={(boleto) => handleSendBoleto(boleto)}
+              />
+            )}
           </div>
         </div>
-
-        <div className="flex-1 overflow-y-auto p-4">
-          {loadingMK ? (
-            <div className="flex items-center justify-center py-8">
-              <Loader className="animate-spin text-indigo-400" size={20} />
-            </div>
-          ) : (
-            <MKSearchPanel
-              contact={selected?.contact}
-              profile={profile!}
-              mkClient={mkClient}
-              boletos={boletos}
-              activeTab={activeTab}
-              conversationClosed={selected?.status === 'closed'}
-              onClientSelected={(client) => setMkClient(client)}
-              onBoletosFetched={(bols) => setBoletos(bols)}
-              onEnviarBoleto={(boleto) => handleSendBoleto(boleto)}
-            />
-          )}
-        </div>
-      </div>
+      )}
     </div>
   )
 }
