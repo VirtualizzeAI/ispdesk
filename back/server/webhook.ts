@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url'
 // Carrega variáveis do .env da raiz do projeto
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 config({ path: path.resolve(__dirname, '..', '.env') })
+config({ path: path.resolve(__dirname, '..', '..', '.env'), override: false })
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || ''
 const SUPABASE_SERVICE_KEY = process.env.VITE_SUPABASE_SERVICE_KEY || ''
@@ -53,6 +54,43 @@ function unwrapMessage(message: any): any {
   return current || message
 }
 
+function resolveIncomingMessage(payload: any): {
+  msgData: any
+  msgKey: any
+  messageType: string
+  pushName: string
+} {
+  const data = payload?.data || {}
+
+  // Formato comum: data.message + data.key
+  if (data?.message && data?.key) {
+    return {
+      msgData: data.message,
+      msgKey: data.key,
+      messageType: data.messageType || '',
+      pushName: data.pushName || '',
+    }
+  }
+
+  // Formato alternativo: data.messages[0]
+  const first = Array.isArray(data?.messages) ? data.messages[0] : null
+  if (first?.message && first?.key) {
+    return {
+      msgData: first.message,
+      msgKey: first.key,
+      messageType: first.messageType || data.messageType || '',
+      pushName: first.pushName || data.pushName || '',
+    }
+  }
+
+  return {
+    msgData: null,
+    msgKey: null,
+    messageType: data?.messageType || '',
+    pushName: data?.pushName || '',
+  }
+}
+
 // ---------- app ----------
 
 const app = express()
@@ -63,8 +101,9 @@ app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOStrin
 app.post('/webhook/evolution', async (req, res) => {
   const payload = req.body
   const evento = payload?.event || ''
-  const fromMe = payload?.data?.key?.fromMe
-  console.log(`[webhook] ← evento="${evento}" instance="${payload?.instance}" messageType="${payload?.data?.messageType}" fromMe=${fromMe}`)
+  const incoming = resolveIncomingMessage(payload)
+  const fromMe = incoming?.msgKey?.fromMe
+  console.log(`[webhook] ← evento="${evento}" instance="${payload?.instance}" messageType="${incoming?.messageType || payload?.data?.messageType}" fromMe=${fromMe}`)
 
   // Responde imediatamente para não deixar a Evolution esperando
   res.status(200).json({ ok: true })
@@ -78,12 +117,12 @@ app.post('/webhook/evolution', async (req, res) => {
     }
 
     const instanceName: string = payload.instance
-    const msgData = payload.data?.message
-    const msgKey  = payload.data?.key
-    const messageType: string = payload.data?.messageType || ''
+    const msgData = incoming.msgData
+    const msgKey  = incoming.msgKey
+    const messageType: string = incoming.messageType || ''
 
     if (!msgData || !msgKey) {
-      console.warn('[webhook] ignorado — msgData ou msgKey ausente')
+      console.warn('[webhook] ignorado — msgData ou msgKey ausente (formato de payload não reconhecido)')
       return
     }
     if (msgKey.fromMe) {
@@ -118,7 +157,7 @@ app.post('/webhook/evolution', async (req, res) => {
 
     // ---------- contato ----------
     const phone    = msgKey.remoteJid.replace('@s.whatsapp.net', '')
-    const pushName = payload.data?.pushName || phone
+    const pushName = incoming.pushName || phone
 
     const { data: contact, error: contactError } = await supabase
       .from('contacts')
@@ -215,7 +254,7 @@ app.post('/webhook/evolution', async (req, res) => {
     } else if (messageType === 'documentMessage' || messageType === 'documentWithCaptionMessage' || normalizedMessage.documentMessage) {
       const m = normalizedMessage.documentMessage || {}
       mediaMime = m.mimetype || 'application/octet-stream'
-      mediaType = mediaTypeFromMime(mediaMime)
+      mediaType = mediaTypeFromMime(mediaMime || 'application/octet-stream')
       content   = m.caption || m.fileName || ''
     } else if (normalizedMessage.conversation || normalizedMessage.extendedTextMessage?.text) {
       content = normalizedMessage.conversation || normalizedMessage.extendedTextMessage?.text || ''

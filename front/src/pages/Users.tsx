@@ -32,29 +32,35 @@ export default function Users() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  useEffect(() => {
+  const fetchUsers = async () => {
     if (!profile?.tenant_id) return
 
-    supabase
+    const { data } = await supabase
       .from('profiles')
       .select('*')
       .eq('tenant_id', profile.tenant_id)
-      .then(({ data }) => {
-        const mapped = ((data || []) as Array<Record<string, unknown>>).map(row => {
-          const departmentId = String(row.department_id || '')
-          const departmentName = departments.find(dep => dep.id === departmentId)?.name
-          return {
-            id: String(row.id),
-            name: String(row.name || '-'),
-            email: String(row.email || '-'),
-            role: (String(row.role || 'agent') as 'admin' | 'agent' | 'manager'),
-            department_id: departmentId || undefined,
-            departmentName,
-            status: (String(row.status || 'active') as 'active' | 'inactive'),
-          }
-        })
-        setUsers(mapped)
-      })
+
+    const mapped = ((data || []) as Array<Record<string, unknown>>).map(row => {
+      const departmentId = String(row.department_id || '')
+      const departmentName = departments.find(dep => dep.id === departmentId)?.name
+      return {
+        id: String(row.id),
+        name: String(row.name || '-'),
+        email: String(row.email || '-'),
+        role: (String(row.role || 'agent') as 'admin' | 'agent' | 'manager'),
+        department_id: departmentId || undefined,
+        departmentName,
+        status: (String(row.status || 'active') as 'active' | 'inactive'),
+      }
+    })
+
+    setUsers(mapped)
+  }
+
+  useEffect(() => {
+    if (!profile?.tenant_id) return
+
+    fetchUsers()
   }, [departments, profile?.tenant_id])
 
   const filteredUsers = useMemo(() => {
@@ -107,14 +113,26 @@ export default function Users() {
             : u
         ))
       } else {
-        setError('Criacao de colaborador exige convite/autenticacao. Edite colaboradores existentes nesta tela.')
-        setLoading(false)
-        return
+        const { data: invokeData, error: invokeError } = await supabase.functions.invoke('invite-collaborator', {
+          body: {
+            name: formData.name,
+            email: formData.email,
+            role: formData.role,
+            department_id: formData.department_id || null,
+            status: formData.status,
+          },
+        })
+
+        if (invokeError) throw invokeError
+        if (invokeData?.error) throw new Error(String(invokeData.error))
+
+        await fetchUsers()
       }
       resetForm()
       setShowForm(false)
     } catch (err) {
-      setError('Erro ao salvar usuário')
+      const message = err instanceof Error ? err.message : 'Erro ao salvar usuario'
+      setError(message)
     } finally {
       setLoading(false)
     }
@@ -134,7 +152,17 @@ export default function Users() {
 
   const handleDelete = (id: string) => {
     if (confirm('Tem certeza que deseja deletar este usuário?')) {
-      setUsers(users.filter(u => u.id !== id))
+      supabase
+        .from('profiles')
+        .update({ status: 'inactive' })
+        .eq('id', id)
+        .then(({ error: updateError }) => {
+          if (updateError) {
+            alert(updateError.message)
+            return
+          }
+          setUsers(users.map(user => user.id === id ? { ...user, status: 'inactive' } : user))
+        })
     }
   }
 

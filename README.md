@@ -1,73 +1,42 @@
-# React + TypeScript + Vite
+# ISPDesk
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Projeto separado em duas camadas:
 
-Currently, two official plugins are available:
+- front: aplicacao React + Vite
+- back: webhook Node/Express + Supabase (functions e migrations)
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Estrutura
 
-## React Compiler
+- front/src: codigo do frontend
+- front/public: arquivos estaticos
+- back/server: webhook local
+- back/supabase/functions: edge functions
+- back/supabase/migrations: scripts SQL
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Comandos (raiz)
 
-## Expanding the ESLint configuration
+- npm run dev: sobe front e back juntos
+- npm run dev:front: sobe apenas frontend
+- npm run dev:back: sobe apenas backend
+- npm run build: build do frontend
+- npm run build:back: checagem TypeScript do backend
+- npm run lint: lint do frontend
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Ambientes
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+O backend tenta carregar variaveis de:
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+1. back/.env
+2. .env da raiz
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+Padrao recomendado:
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+- front/.env para variaveis do frontend
+- back/.env para variaveis do webhook e scripts do backend
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+Arquivos de referencia:
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+- front/.env.example
+- back/.env.example
+
+Para desenvolvimento local simples, voce ainda pode manter um .env na raiz com as variaveis compartilhadas. O webhook continua aceitando esse fallback.
