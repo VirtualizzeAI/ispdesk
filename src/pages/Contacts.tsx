@@ -29,6 +29,28 @@ function getStatusFromData(data: Record<string, unknown> | null): string {
   return 'A'
 }
 
+function getFirstValue(data: Record<string, unknown> | null, keys: string[]): string {
+  if (!data) return '-'
+  for (const key of keys) {
+    const value = data[key]
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      return String(value)
+    }
+  }
+  return '-'
+}
+
+function toNumber(value: unknown): number {
+  if (value === null || value === undefined) return 0
+  const normalized = String(value).replace(/\./g, '').replace(',', '.').replace(/[^\d.-]/g, '')
+  const parsed = Number(normalized)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function formatBRL(value: number): string {
+  return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+}
+
 export default function Contacts() {
   const { profile } = useProfile()
   const { syncing, syncProgress, syncError, syncContacts } = useContactsSync()
@@ -55,6 +77,28 @@ export default function Contacts() {
     if (!selectedContactId) return null
     return filtered.find(c => c.id === selectedContactId) || null
   }, [filtered, selectedContactId])
+
+  const selectedMKData = useMemo(() => {
+    if (!selectedContact || typeof selectedContact.mk_data !== 'object' || !selectedContact.mk_data) return null
+    return selectedContact.mk_data as unknown as Record<string, unknown>
+  }, [selectedContact])
+
+  const selectedStatus = useMemo(() => getStatusFromData(selectedMKData), [selectedMKData])
+
+  const financialKPIs = useMemo(() => {
+    const totalOpen = toNumber(getFirstValue(selectedMKData, ['valor_aberto', 'total_aberto', 'debito_total', 'valor_em_aberto']))
+    const overdueCount = toNumber(getFirstValue(selectedMKData, ['qtd_titulos_vencidos', 'titulos_vencidos', 'boletos_vencidos']))
+    const openCount = toNumber(getFirstValue(selectedMKData, ['qtd_titulos_abertos', 'titulos_abertos', 'boletos_abertos']))
+    const lastPaymentValue = toNumber(getFirstValue(selectedMKData, ['ultimo_pagamento_valor', 'valor_ultimo_pagamento']))
+
+    return {
+      totalOpen,
+      overdueCount,
+      openCount,
+      lastPaymentValue,
+      lastPaymentDate: getFirstValue(selectedMKData, ['ultimo_pagamento_data', 'dt_ultimo_pagamento']),
+    }
+  }, [selectedMKData])
 
   return (
     <div className="space-y-5">
@@ -261,7 +305,7 @@ export default function Contacts() {
 
       {selectedContact && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[85vh] overflow-hidden">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[85vh] overflow-hidden">
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
               <h3 className="text-lg font-semibold text-gray-900">Detalhes do cliente</h3>
               <button
@@ -275,34 +319,120 @@ export default function Contacts() {
             </div>
 
             <div className="p-5 overflow-y-auto space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <p className="text-xs text-gray-400">Nome</p>
-                  <p className="text-sm font-medium text-gray-900">{selectedContact.name || '-'}</p>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="bg-indigo-50 border border-indigo-100 rounded-lg p-3">
+                  <p className="text-xs text-indigo-700/80">Status</p>
+                  <p className="text-sm font-semibold text-indigo-900">{statusMap[selectedStatus]?.label || 'Ativo'}</p>
                 </div>
-                <div>
-                  <p className="text-xs text-gray-400">WhatsApp</p>
-                  <p className="text-sm font-medium text-gray-900">{selectedContact.whatsapp || '-'}</p>
+                <div className="bg-red-50 border border-red-100 rounded-lg p-3">
+                  <p className="text-xs text-red-700/80">Total em aberto</p>
+                  <p className="text-sm font-semibold text-red-900">{formatBRL(financialKPIs.totalOpen)}</p>
                 </div>
-                <div>
-                  <p className="text-xs text-gray-400">Login</p>
-                  <p className="text-sm font-medium text-gray-900">{selectedContact.mk_id || '-'}</p>
+                <div className="bg-amber-50 border border-amber-100 rounded-lg p-3">
+                  <p className="text-xs text-amber-700/80">Titulos vencidos</p>
+                  <p className="text-sm font-semibold text-amber-900">{financialKPIs.overdueCount}</p>
                 </div>
-                <div>
-                  <p className="text-xs text-gray-400">Sincronizado em</p>
-                  <p className="text-sm font-medium text-gray-900">
-                    {selectedContact.mk_synced_at
-                      ? new Date(selectedContact.mk_synced_at).toLocaleString('pt-BR')
-                      : '-'}
-                  </p>
+                <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-3">
+                  <p className="text-xs text-emerald-700/80">Ultimo pagamento</p>
+                  <p className="text-sm font-semibold text-emerald-900">{formatBRL(financialKPIs.lastPaymentValue)}</p>
                 </div>
               </div>
 
-              <div>
-                <p className="text-xs text-gray-400 mb-2">Dados completos (MK Auth)</p>
-                <pre className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs text-gray-700 overflow-auto max-h-72">
-                  {JSON.stringify(selectedContact.mk_data || {}, null, 2)}
-                </pre>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
+                  <h4 className="text-sm font-semibold text-gray-900">Dados pessoais</h4>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <p className="text-xs text-gray-500">Nome</p>
+                      <p className="text-sm font-medium text-gray-900">{selectedContact.name || '-'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500">WhatsApp</p>
+                      <p className="text-sm font-medium text-gray-900">{selectedContact.whatsapp || '-'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500">Login</p>
+                      <p className="text-sm font-medium text-gray-900">{selectedContact.mk_id || '-'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500">CPF</p>
+                      <p className="text-sm font-medium text-gray-900">{getFirstValue(selectedMKData, ['cpf', 'cnpj'])}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500">Email</p>
+                      <p className="text-sm font-medium text-gray-900">{getFirstValue(selectedMKData, ['email'])}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500">Telefone secundario</p>
+                      <p className="text-sm font-medium text-gray-900">{getFirstValue(selectedMKData, ['telefone', 'celular'])}</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
+                  <h4 className="text-sm font-semibold text-gray-900">Plano e assinatura</h4>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <p className="text-xs text-gray-500">Plano atual</p>
+                      <p className="text-sm font-medium text-gray-900">{getFirstValue(selectedMKData, ['plano', 'nomeplano', 'tipo'])}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500">Vencimento</p>
+                      <p className="text-sm font-medium text-gray-900">{getFirstValue(selectedMKData, ['vencimento', 'dia_vencimento'])}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500">Titulos em aberto</p>
+                      <p className="text-sm font-medium text-gray-900">{financialKPIs.openCount}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500">Ultimo pagamento</p>
+                      <p className="text-sm font-medium text-gray-900">{financialKPIs.lastPaymentDate}</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
+                <h4 className="text-sm font-semibold text-gray-900">Endereco</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+                  <div className="md:col-span-2">
+                    <p className="text-xs text-gray-500">Logradouro</p>
+                    <p className="text-sm font-medium text-gray-900">{getFirstValue(selectedMKData, ['endereco', 'logradouro'])}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500">Numero</p>
+                    <p className="text-sm font-medium text-gray-900">{getFirstValue(selectedMKData, ['numero'])}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500">Complemento</p>
+                    <p className="text-sm font-medium text-gray-900">{getFirstValue(selectedMKData, ['complemento'])}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500">Bairro</p>
+                    <p className="text-sm font-medium text-gray-900">{getFirstValue(selectedMKData, ['bairro'])}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500">Cidade</p>
+                    <p className="text-sm font-medium text-gray-900">{getFirstValue(selectedMKData, ['cidade'])}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500">UF</p>
+                    <p className="text-sm font-medium text-gray-900">{getFirstValue(selectedMKData, ['uf', 'estado'])}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500">CEP</p>
+                    <p className="text-sm font-medium text-gray-900">{getFirstValue(selectedMKData, ['cep'])}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                <p className="text-xs text-gray-500 mb-2">Sincronizado em</p>
+                <p className="text-sm font-medium text-gray-900">
+                  {selectedContact.mk_synced_at
+                    ? new Date(selectedContact.mk_synced_at).toLocaleString('pt-BR')
+                    : '-'}
+                </p>
               </div>
             </div>
           </div>

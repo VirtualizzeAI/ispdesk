@@ -7,6 +7,28 @@ export function useConversations(tenantId: string) {
   const [loading, setLoading] = useState(true)
   const initialLoadDone = useRef(false)
 
+  const deleteConversation = async (conversationId: string) => {
+    if (!tenantId || !conversationId) return
+
+    const { error: messagesError } = await supabase
+      .from('messages')
+      .delete()
+      .eq('tenant_id', tenantId)
+      .eq('conversation_id', conversationId)
+
+    if (messagesError) throw messagesError
+
+    const { error: conversationError } = await supabase
+      .from('conversations')
+      .delete()
+      .eq('tenant_id', tenantId)
+      .eq('id', conversationId)
+
+    if (conversationError) throw conversationError
+
+    setConversations(prev => prev.filter(conversation => conversation.id !== conversationId))
+  }
+
   useEffect(() => {
     // Aguarda tenant_id estar disponível
     if (!tenantId) return
@@ -66,7 +88,7 @@ export function useConversations(tenantId: string) {
     }
   }, [tenantId]) // só roda quando tenantId mudar
 
-  return { conversations, loading }
+  return { conversations, loading, deleteConversation }
 }
 
 export function useMessages(conversationId: string) {

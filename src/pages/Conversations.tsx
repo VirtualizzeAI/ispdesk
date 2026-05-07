@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
-import { Search, Send, MoreVertical, User, FileText, Loader, CheckCircle, RefreshCw, Paperclip, X, Image as ImageIcon, File as FileIcon, Mic, PanelRightClose, Square } from 'lucide-react'
+import { Search, Send, MoreVertical, User, FileText, Loader, CheckCircle, RefreshCw, Paperclip, X, Image as ImageIcon, File as FileIcon, Mic, PanelRightClose, Square, Trash2, TicketPlus, ArrowRightLeft } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useConversations, useMessages } from '../hooks/useConversations'
 import { useProfile } from '../hooks/useProfile'
+import { useDepartments } from '../hooks/useDepartments'
 import { getMKClientByLogin, getMKTitulosByCPF } from '../lib/mkauth'
 import { sendTextMessage, sendMediaMessage, getMediaBase64 } from '../lib/evolution'
 import type { Message } from '../types'
@@ -234,13 +235,15 @@ const MessageMedia = ({ msg, instanceName }: { msg: any, instanceName: string })
 
 export default function Conversations() {
   const { profile } = useProfile()
-  const { conversations, loading } = useConversations(profile?.tenant_id || '')
+  const { conversations, loading, deleteConversation } = useConversations(profile?.tenant_id || '')
+  const { departments } = useDepartments(profile?.tenant_id || null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const selected = conversations.find(c => c.id === selectedId) ?? null
   const { messages, loadingMessages } = useMessages(selectedId || '')
   const [message, setMessage] = useState('')
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState('all')
+  const [ownerFilter, setOwnerFilter] = useState<'all' | 'mine'>('all')
   const [dateFilter, setDateFilter] = useState<DateFilter>('all')
   const [activeTab, setActiveTab] = useState<'cliente' | 'boletos'>('cliente')
   const [mkClient, setMkClient] = useState<any>(null)
@@ -259,12 +262,35 @@ export default function Conversations() {
   const [uploading, setUploading] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [recordingTime, setRecordingTime] = useState(0)
+  const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null)
+  const [assumingConversationId, setAssumingConversationId] = useState<string | null>(null)
+  const [showActionsMenu, setShowActionsMenu] = useState(false)
+  const [creatingTicket, setCreatingTicket] = useState(false)
+  const [showTransferModal, setShowTransferModal] = useState(false)
+  const [transferAgentId, setTransferAgentId] = useState('')
+  const [transferDepartment, setTransferDepartment] = useState('')
+  const [collaborators, setCollaborators] = useState<Array<{ id: string; name: string; department_id?: string | null }>>([])
+  const actionsMenuRef = useRef<HTMLDivElement>(null)
   const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
   // Reseta contador ao trocar de conversa e vai para o fim das mensagens
   useEffect(() => {
     messageCountRef.current = 0
+    setShowActionsMenu(false)
   }, [selectedId])
+
+  useEffect(() => {
+    if (!showActionsMenu) return
+
+    const handleClickOutside = (event: MouseEvent) => {
+      if (!actionsMenuRef.current?.contains(event.target as Node)) {
+        setShowActionsMenu(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [showActionsMenu])
 
   // Auto scroll para o fim — quando termina o carregamento inicial e quando chegam novas mensagens
   useEffect(() => {
@@ -284,6 +310,25 @@ export default function Conversations() {
       .maybeSingle()
       .then(({ data }) => { if (data) setInstanceName(data.instance_name) })
   }, [profile])
+
+  useEffect(() => {
+    if (!profile?.tenant_id) return
+
+    supabase
+      .from('profiles')
+      .select('id,name,department_id')
+      .eq('tenant_id', profile.tenant_id)
+      .then(({ data }) => {
+        if (!data) return
+        setCollaborators(data)
+      })
+  }, [profile?.tenant_id])
+
+  useEffect(() => {
+    if (!transferDepartment && departments.length > 0) {
+      setTransferDepartment(departments[0].id)
+    }
+  }, [departments, transferDepartment])
 
   // Seleciona primeira conversa automaticamente
   useEffect(() => {
@@ -338,8 +383,9 @@ export default function Conversations() {
     const matchSearch = name.toLowerCase().includes(search.toLowerCase()) ||
       c.contact?.whatsapp?.includes(search)
     const matchFilter = filter === 'all' || c.status === filter
+    const matchOwner = ownerFilter === 'all' || c.assigned_to === profile?.id
     const matchDateFilter = matchesDateFilter(c.updated_at, dateFilter)
-    return matchSearch && matchFilter && matchDateFilter
+    return matchSearch && matchFilter && matchDateFilter && matchOwner
   })
 
   useEffect(() => {
@@ -360,6 +406,99 @@ export default function Conversations() {
       .from('conversations')
       .update({ status: newStatus, updated_at: new Date().toISOString() })
       .eq('id', selected.id)
+  }
+
+  const handleDeleteConversation = async () => {
+    if (!selected || !profile || deletingConversationId) return
+
+    const contactName = selected.contact?.name || selected.contact?.whatsapp || 'esta conversa'
+    const shouldDelete = window.confirm(`Deseja apagar permanentemente a conversa com ${contactName}? Esta ação não pode ser desfeita.`)
+    if (!shouldDelete) return
+
+    setDeletingConversationId(selected.id)
+    try {
+      await deleteConversation(selected.id)
+      setSelectedId(currentId => (currentId === selected.id ? null : currentId))
+    } catch (error) {
+      console.error('Erro ao apagar conversa:', error)
+      alert('Não foi possível apagar a conversa. Tente novamente.')
+    } finally {
+      setDeletingConversationId(null)
+    }
+  }
+
+  const handleAssumeConversation = async () => {
+    if (!selected || !profile || assumingConversationId) return
+
+    setAssumingConversationId(selected.id)
+    try {
+      await supabase
+        .from('conversations')
+        .update({ status: 'open', assigned_to: profile.id, updated_at: new Date().toISOString() })
+        .eq('id', selected.id)
+    } catch (error) {
+      console.error('Erro ao assumir conversa:', error)
+      alert('Não foi possível assumir a conversa. Tente novamente.')
+    } finally {
+      setAssumingConversationId(null)
+    }
+  }
+
+  const handleOpenTicket = async () => {
+    if (!selected || !profile || creatingTicket) return
+
+    setCreatingTicket(true)
+    try {
+      const contactName = selected.contact?.name || selected.contact?.whatsapp || 'Cliente'
+      const title = `Atendimento iniciado via conversa - ${contactName}`
+
+      await supabase.from('tickets').insert({
+        tenant_id: profile.tenant_id,
+        contact_id: selected.contact_id,
+        conversation_id: selected.id,
+        title,
+        status: 'open',
+        priority: 'normal',
+        assigned_to: profile.id,
+      })
+
+      alert('Chamado criado com sucesso.')
+    } catch (error) {
+      console.error('Erro ao criar chamado:', error)
+      alert('Nao foi possivel criar o chamado.')
+    } finally {
+      setCreatingTicket(false)
+    }
+  }
+
+  const handleTransferConversation = async () => {
+    if (!selected || !profile) return
+
+    try {
+      await supabase
+        .from('conversations')
+        .update({
+          assigned_to: transferAgentId || null,
+          status: 'waiting',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', selected.id)
+
+      const toName = collaborators.find(collab => collab.id === transferAgentId)?.name || 'fila geral'
+      const toDepartment = departments.find(dep => dep.id === transferDepartment)?.name || 'Sem setor'
+      await supabase.from('messages').insert({
+        conversation_id: selected.id,
+        tenant_id: profile.tenant_id,
+        from_me: true,
+        content: `[Sistema] Conversa transferida para ${toName} (${toDepartment}).`,
+      })
+
+      setShowTransferModal(false)
+      alert('Conversa transferida com sucesso.')
+    } catch (error) {
+      console.error('Erro ao transferir conversa:', error)
+      alert('Nao foi possivel transferir a conversa.')
+    }
   }
 
   const fileToBase64 = (file: File): Promise<string> => {
@@ -569,6 +708,13 @@ export default function Conversations() {
   }
 
   const messageListItems = buildMessageListItems(messages)
+  const isDeletingSelectedConversation = deletingConversationId === selected?.id
+  const isAssumingSelectedConversation = assumingConversationId === selected?.id
+  const collaboratorsByDepartment = collaborators.filter(collab => {
+    if (!transferDepartment) return true
+    if (!collab.department_id) return false
+    return collab.department_id === transferDepartment
+  })
 
   if (!profile) return (
     <div className="flex items-center justify-center h-full">
@@ -605,6 +751,17 @@ export default function Conversations() {
             />
           </div>
           <div className="flex gap-1">
+            {[['all', 'Todas'], ['mine', 'Minhas']].map(([val, label]) => (
+              <button
+                key={val}
+                onClick={() => setOwnerFilter(val as 'all' | 'mine')}
+                className={`flex-1 text-xs py-1.5 rounded-md font-medium transition-colors ${ownerFilter === val ? 'bg-slate-700 text-white' : 'text-gray-500 hover:bg-gray-100'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="mt-2 flex gap-1">
             {[['all', 'Todos'], ['open', 'Abertos'], ['waiting', 'Ag.'], ['closed', 'Fechados']].map(([val, label]) => (
               <button key={val} onClick={() => setFilter(val)}
                 className={`flex-1 text-xs py-1.5 rounded-md font-medium transition-colors ${filter === val ? 'bg-indigo-600 text-white' : 'text-gray-500 hover:bg-gray-100'}`}>
@@ -682,6 +839,28 @@ export default function Conversations() {
               </div>
             </div>
             <div className="flex items-center gap-2">
+              <button
+                onClick={handleOpenTicket}
+                disabled={creatingTicket}
+                className="flex items-center gap-1.5 text-xs bg-indigo-600 text-white px-3 py-1.5 rounded-lg hover:bg-indigo-700 transition-colors font-medium disabled:opacity-60"
+              >
+                {creatingTicket ? <Loader size={13} className="animate-spin" /> : <TicketPlus size={13} />} Abrir chamado
+              </button>
+              <button
+                onClick={() => setShowTransferModal(true)}
+                className="flex items-center gap-1.5 text-xs bg-amber-50 text-amber-700 px-3 py-1.5 rounded-lg hover:bg-amber-100 transition-colors font-medium"
+              >
+                <ArrowRightLeft size={13} /> Transferir
+              </button>
+              {selected.status === 'waiting' && (
+                <button
+                  onClick={handleAssumeConversation}
+                  disabled={isAssumingSelectedConversation}
+                  className="flex items-center gap-1.5 text-xs bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-lg hover:bg-indigo-100 transition-colors font-medium disabled:opacity-60"
+                >
+                  {isAssumingSelectedConversation ? <Loader size={13} className="animate-spin" /> : <CheckCircle size={13} />} Assumir conversa
+                </button>
+              )}
               {selected.status === 'closed' ? (
                 <button
                   onClick={handleCloseConversation}
@@ -697,9 +876,49 @@ export default function Conversations() {
                   <CheckCircle size={13} /> Fechar conversa
                 </button>
               )}
-              <button className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100">
-                <MoreVertical size={17} />
-              </button>
+              <div ref={actionsMenuRef} className="relative">
+                <button
+                  type="button"
+                  onClick={() => setShowActionsMenu(current => !current)}
+                  className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+                  aria-label="Abrir ações da conversa"
+                >
+                  <MoreVertical size={17} />
+                </button>
+                {showActionsMenu && (
+                  <div className="absolute right-0 top-10 z-20 w-52 rounded-lg border border-gray-200 bg-white p-1.5 shadow-lg">
+                    {selected.status === 'waiting' && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            setShowActionsMenu(false)
+                            await handleAssumeConversation()
+                          }}
+                          disabled={isAssumingSelectedConversation}
+                          className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-indigo-600 hover:bg-indigo-50 disabled:opacity-60"
+                        >
+                          {isAssumingSelectedConversation ? <Loader size={15} className="animate-spin" /> : <CheckCircle size={15} />}
+                          Assumir conversa
+                        </button>
+                        <div className="my-1 h-px bg-gray-100" />
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setShowActionsMenu(false)
+                        await handleDeleteConversation()
+                      }}
+                      disabled={isDeletingSelectedConversation}
+                      className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-red-600 hover:bg-red-50 disabled:opacity-60"
+                    >
+                      {isDeletingSelectedConversation ? <Loader size={15} className="animate-spin" /> : <Trash2 size={15} />}
+                      Apagar conversa
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -846,6 +1065,71 @@ export default function Conversations() {
       ) : (
         <div className="flex-1 flex items-center justify-center bg-gray-50">
           <p className="text-gray-400 text-sm">Selecione uma conversa</p>
+        </div>
+      )}
+
+      {/* Painel MK-Auth */}
+      {showTransferModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl">
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="text-base font-semibold text-gray-900">Transferir conversa</h3>
+              <button
+                type="button"
+                onClick={() => setShowTransferModal(false)}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-gray-500">Setor</label>
+                <select
+                  value={transferDepartment}
+                  onChange={e => setTransferDepartment(e.target.value)}
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  {departments.length === 0 && <option value="">Sem setores cadastrados</option>}
+                  {departments.map(department => (
+                    <option key={department.id} value={department.id}>{department.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-medium text-gray-500">Atendente destino</label>
+                <select
+                  value={transferAgentId}
+                  onChange={e => setTransferAgentId(e.target.value)}
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="">Fila geral (sem atendente)</option>
+                  {collaboratorsByDepartment.map(collab => (
+                    <option key={collab.id} value={collab.id}>{collab.name}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowTransferModal(false)}
+                className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleTransferConversation}
+                className="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+              >
+                Confirmar transferencia
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

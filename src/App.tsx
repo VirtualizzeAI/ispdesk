@@ -11,6 +11,8 @@ import Conversations from './pages/Conversations'
 import Contacts from './pages/Contacts'
 import Tickets from './pages/Tickets'
 import Settings from './pages/Settings'
+import Departments from './pages/Departments'
+import Users from './pages/Users'
 
 const queryClient = new QueryClient()
 
@@ -48,6 +50,8 @@ function App() {
             <Route path="conversations" element={<Conversations />} />
             <Route path="contacts" element={<Contacts />} />
             <Route path="tickets" element={<Tickets />} />
+            <Route path="departments" element={<Departments />} />
+            <Route path="users" element={<Users />} />
             <Route path="settings" element={<Settings />} />
           </Route>
         </Routes>

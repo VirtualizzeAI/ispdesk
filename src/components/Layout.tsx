@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, MessageSquare, Users,
-  Ticket, Settings, LogOut, Wifi, Bell, PanelLeftClose, PanelLeftOpen
+  Ticket, Settings, LogOut, Wifi, Bell, PanelLeftClose, PanelLeftOpen, Building2, UserCog
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 
@@ -11,6 +11,8 @@ const navItems = [
   { to: '/conversations', icon: MessageSquare, label: 'Conversas' },
   { to: '/contacts', icon: Users, label: 'Clientes' },
   { to: '/tickets', icon: Ticket, label: 'Chamados' },
+  { to: '/departments', icon: Building2, label: 'Setores' },
+  { to: '/users', icon: UserCog, label: 'Colaboradores' },
   { to: '/settings', icon: Settings, label: 'Configurações' },
 ]
 

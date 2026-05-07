@@ -82,3 +82,38 @@ export interface Ticket {
   updated_at: string
   contact?: Contact
 }
+
+export interface Department {
+  id: string
+  tenant_id: string
+  name: string
+  description?: string
+  color?: string
+  order?: number
+  created_at: string
+  updated_at: string
+  _count?: {
+    users?: number
+  }
+}
+
+export interface User {
+  id: string
+  tenant_id: string
+  name: string
+  email: string
+  role: 'admin' | 'agent' | 'manager'
+  department_id?: string
+  status: 'active' | 'inactive'
+  created_at: string
+  updated_at: string
+  department?: Department
+}
+
+export interface KPIMetric {
+  label: string
+  value: string | number
+  change?: number
+  trend?: 'up' | 'down' | 'stable'
+  color: string
+}
